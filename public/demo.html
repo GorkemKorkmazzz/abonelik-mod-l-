@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="tr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Demo Ürün Sayfası</title>
+<style>body{font-family:system-ui,Arial,sans-serif;max-width:900px;margin:30px auto;padding:0 16px;display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:30px}
+@media(max-width:700px){body{grid-template-columns:1fr}}.img{background:#eef1ec;border-radius:12px;aspect-ratio:1;display:flex;align-items:center;justify-content:center;color:#999}
+.add{width:100%;padding:14px;background:#111;color:#fff;border:0;border-radius:8px;font-size:16px}</style></head>
+<body>
+<div class="img">Ürün görseli</div>
+<div><h1>Organik Elma Sirkesi 500 ml</h1><p style="font-size:22px">799,00 TL</p>
+<p style="color:#666">Demo: bu sayfa mağaza ürün sayfasını taklit eder. Ürün panelden aboneliğe açılmış olmalı (slug: <code>organik-elma-sirkesi</code>).</p>
+<button class="add" onclick="alert('Normal sepete ekleme')">Sepete Ekle</button></div>
+<script>window.ABONELIK_SLUG = new URLSearchParams(location.search).get('slug') || 'organik-elma-sirkesi';</script>
+<script src="/widget.js"></script>
+</body></html>

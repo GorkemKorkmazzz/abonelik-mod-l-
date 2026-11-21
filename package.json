@@ -1,0 +1,17 @@
+{
+  "name": "ikas-abonelik-modulu",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "ikas için kart saklamadan düzenli teslimat (abonelik) modülü",
+  "engines": { "node": ">=22.5" },
+  "scripts": {
+    "start": "node --env-file-if-exists=.env src/server.js",
+    "dev": "node --watch --env-file-if-exists=.env src/server.js",
+    "test": "node --test test/*.test.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "nodemailer": "^6.9.16"
+  }
+}
