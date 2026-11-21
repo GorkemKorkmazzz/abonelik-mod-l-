@@ -48,16 +48,45 @@ app.get('/widget.js', (req, res) => {
 // ---------- Müşteri abonelik yönetim sayfası ----------
 app.use('/s', manageRouter);
 
-// ---------- Satıcı paneli (Basic Auth) ----------
+// ---------- Satıcı paneli (giriş formu + çerez; Basic Auth da kabul edilir) ----------
+const sha = (s) => crypto.createHash('sha256').update(String(s)).digest();
+const same = (x, y) => crypto.timingSafeEqual(sha(x), sha(y));
+// Oturum çerezi şifreden türetilir: şifre değişince tüm oturumlar düşer.
+const sessionValue = () => crypto.createHmac('sha256', process.env.ADMIN_PASSWORD).update('abonelik-panel').digest('base64url');
+const cookie = (req) => Object.fromEntries((req.headers.cookie || '').split(';').map((c) => c.trim().split('=')).filter((p) => p[1]))['abn_sess'];
+
 function adminAuth(req, res, next) {
   const pass = process.env.ADMIN_PASSWORD;
   if (!pass) return res.status(500).send('ADMIN_PASSWORD tanımlı değil');
+  if (cookie(req) && same(cookie(req), sessionValue())) return next();
   const [, b64] = (req.headers.authorization || '').split(' ');
   const [, given = ''] = Buffer.from(b64 || '', 'base64').toString().split(':');
-  const a = crypto.createHash('sha256').update(given).digest(), b = crypto.createHash('sha256').update(pass).digest();
-  if (crypto.timingSafeEqual(a, b)) return next();
-  res.set('WWW-Authenticate', 'Basic realm="Abonelik Paneli"').status(401).send('Yetkisiz');
+  if (b64 && same(given, pass)) return next();
+  if (req.method === 'GET' && !req.originalUrl.startsWith('/api/')) return res.redirect('/login');
+  res.status(401).json({ error: 'Oturum süresi doldu, tekrar giriş yapın' });
 }
+
+const loginPage = (err = '') => `<!doctype html><html lang="tr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Abonelik Paneli · Giriş</title><style>body{font-family:system-ui,Arial,sans-serif;background:#f5f6f4;display:flex;min-height:100vh;align-items:center;justify-content:center;margin:0;padding:16px}
+form{background:#fff;padding:28px;border-radius:12px;box-shadow:0 1px 4px #0002;width:100%;max-width:340px}h1{font-size:18px;margin:0 0 16px;color:#2f6b3a}
+input{width:100%;box-sizing:border-box;padding:10px;border:1px solid #ccc;border-radius:8px;margin-bottom:12px;font:inherit}
+button{width:100%;padding:11px;background:#2f6b3a;color:#fff;border:0;border-radius:8px;font:inherit;cursor:pointer}.e{color:#b3261e;font-size:14px;margin-bottom:10px}</style></head>
+<body><form method="post" action="/login"><h1>Abonelik Paneli</h1>${err ? `<div class="e">${err}</div>` : ''}
+<input type="password" name="password" placeholder="Şifre" autofocus required><button>Giriş yap</button></form></body></html>`;
+
+const loginTries = new Map();
+app.get('/login', (req, res) => res.send(loginPage()));
+app.post('/login', express.urlencoded({ extended: false }), (req, res) => {
+  const now = Date.now(), list = (loginTries.get(req.ip) || []).filter((t) => now - t < 600_000);
+  if (list.length >= 10) return res.status(429).send(loginPage('Çok fazla deneme, 10 dakika sonra tekrar deneyin.'));
+  if (!process.env.ADMIN_PASSWORD || !same(req.body?.password || '', process.env.ADMIN_PASSWORD)) {
+    loginTries.set(req.ip, [...list, now]);
+    return res.status(401).send(loginPage('Şifre hatalı.'));
+  }
+  const secure = req.secure ? '; Secure' : '';
+  res.set('Set-Cookie', `abn_sess=${sessionValue()}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${60 * 60 * 24 * 14}${secure}`).redirect('/admin');
+});
+app.get('/logout', (req, res) => res.set('Set-Cookie', 'abn_sess=; Path=/; Max-Age=0').redirect('/login'));
 const admin = express.Router();
 admin.use(adminAuth);
 
