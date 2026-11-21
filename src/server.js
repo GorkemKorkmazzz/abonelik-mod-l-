@@ -151,6 +151,7 @@ admin.post('/install-script', wrap(async (req, res) => {
 }));
 
 app.use('/api/admin', admin);
+app.get('/health', (req, res) => res.json({ ok: true }));
 app.get(['/', '/admin'], adminAuth, (req, res) => res.sendFile(path.resolve('public/admin.html')));
 app.get('/demo', (req, res) => res.sendFile(path.resolve('public/demo.html')));
 

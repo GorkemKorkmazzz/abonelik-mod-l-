@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "description": "ikas için kart saklamadan düzenli teslimat (abonelik) modülü",
-  "engines": { "node": ">=22.5" },
+  "engines": { "node": "24.x" },
   "scripts": {
     "start": "node --env-file-if-exists=.env src/server.js",
     "dev": "node --watch --env-file-if-exists=.env src/server.js",
