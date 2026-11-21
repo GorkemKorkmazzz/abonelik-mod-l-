@@ -24,7 +24,7 @@ th{color:var(--m);font-weight:500}.pill{font-size:12px;padding:2px 8px;border-ra
 </style>
 </head>
 <body>
-<header><h1>Düzenli Teslimat · Abonelik Paneli</h1>
+<header><h1>Düzenli Teslimat · Abonelik Paneli <small id="storeTag" style="font-weight:400;opacity:.8"></small></h1>
 <nav id="nav"><button data-t="settings" class="on">Ayarlar</button><button data-t="products">Ürünler</button><button data-t="subs">Abonelikler</button><button data-t="orders">Siparişler</button><button data-t="mails">Mail Kutusu</button></nav></header>
 <main>
 <section id="settings">
@@ -64,7 +64,7 @@ th{color:var(--m);font-weight:500}.pill{font-size:12px;padding:2px 8px;border-ra
   <div class="card"><h2>Mağazaya Kurulum</h2>
     <p class="muted">Ürün sayfası bileşenini ikas mağazanıza script olarak ekler (saveStorefrontJSScript).</p>
     <div class="row"><div><label>Storefront</label><select id="storefrontId"></select></div></div>
-    <p><button class="btn" onclick="install()">Mağazaya yükle</button> <a href="/demo" target="_blank" class="muted">Demo ürün sayfası</a></p>
+    <p><button class="btn" onclick="install()">Mağazaya yükle</button> <a href="/demo" target="_blank" class="muted" id="demoLink">Demo ürün sayfası</a></p>
     <p><button class="btn sec" onclick="runNow()">Zamanlayıcıyı şimdi çalıştır</button> <span class="muted">Vadesi gelen siparişleri oluşturur ve hatırlatmaları gönderir (normalde otomatik çalışır).</span></p>
   </div>
 </section>
@@ -98,8 +98,11 @@ const pill = (s, t) => `<span class="pill ${esc(s)}">${esc(t || s)}</span>`;
 const ST = { active:'Aktif', paused:'Duraklatıldı', cancelled:'İptal', created:'Oluşturuldu', failed:'Hata', sent:'Gönderildi', logged:'Kaydedildi' };
 let S = {}, enabled = [];
 function toast(m){ const t=$('toast'); t.textContent=m; t.style.display='block'; clearTimeout(t._h); t._h=setTimeout(()=>t.style.display='none',4000); }
+// ikas içinden açılışta oturum anahtarı URL'de (?t=) gelir; iframe'de çerez engellenebildiği için başlıkla gönderilir.
+const SESSION = (() => { const t = new URLSearchParams(location.search).get('t'); try { if (t) sessionStorage.setItem('abn_t', t); return t || sessionStorage.getItem('abn_t') || ''; } catch { return t || ''; } })();
+if (new URLSearchParams(location.search).has('t')) history.replaceState(null, '', location.pathname);
 async function api(path, opt = {}) {
-  const r = await fetch(location.origin + '/api/admin' + path, { ...opt, headers: { 'Content-Type': 'application/json' }, body: opt.body && JSON.stringify(opt.body) });
+  const r = await fetch(location.origin + '/api/admin' + path, { ...opt, headers: { 'Content-Type': 'application/json', 'X-Abn-Session': SESSION }, body: opt.body && JSON.stringify(opt.body) });
   const j = await r.json().catch(() => ({}));
   if (!r.ok) { toast('Hata: ' + (j.error || r.status)); throw new Error(j.error); }
   return j;
@@ -216,6 +219,7 @@ async function testMail() { await api('/test-mail', { method: 'POST', body: { to
 function viewMail(i) { const w = window.open('', '_blank'); w.document.write(mails[i].html); w.document.close(); }
 
 loadSettings();
+api('/me').then((m) => $('storeTag').textContent = '· ' + m.store).catch(() => {});
 </script>
 </body>
 </html>

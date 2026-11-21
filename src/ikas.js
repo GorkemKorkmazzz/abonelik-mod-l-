@@ -1,40 +1,53 @@
-// ikas Admin GraphQL istemcisi (private app, client_credentials).
+// ikas Admin GraphQL istemcisi.
+// - Partner uygulaması: mağaza başına OAuth (authorization_code + refresh_token), `stores` tablosunda.
+// - Özel uygulama (eski kurulum): IKAS_STORE_NAME + IKAS_CLIENT_ID/SECRET ile client_credentials.
 // IKAS_MOCK=1 ile ikas'a gitmeden sahte verilerle çalışır (yerel test için).
+import { db } from './db.js';
+import { env, currentStore, defaultStore } from './context.js';
+
 const MOCK = process.env.IKAS_MOCK === '1';
 const API = process.env.IKAS_API_URL || 'https://api.myikas.com/api/v1/admin/graphql';
+export const oauthBase = (store) => `https://${store}.myikas.com/api/admin/oauth`;
+export const APP_SCOPES = 'read_products,read_orders,write_orders,read_customers,write_customers,write_storefronts';
+export const appCreds = () => ({ client_id: env('IKAS_APP_CLIENT_ID'), client_secret: env('IKAS_APP_CLIENT_SECRET') });
 
-let token = null, tokenExp = 0;
-
-// Panellere yapıştırılan değerlerde kalan boşluk/tırnakları temizle.
-const env = (k) => String(process.env[k] || '').trim().replace(/^["']|["']$/g, '').trim();
-
-async function getToken() {
-  if (token && Date.now() < tokenExp - 60_000) return token;
-  const store = env('IKAS_STORE_NAME');
-  if (!store || !env('IKAS_CLIENT_ID') || !env('IKAS_CLIENT_SECRET')) {
-    throw new Error('IKAS_STORE_NAME / IKAS_CLIENT_ID / IKAS_CLIENT_SECRET tanımlı değil');
-  }
-  const res = await fetch(`https://${store}.myikas.com/api/admin/oauth/token`, {
+export async function tokenRequest(store, body) {
+  const res = await fetch(`${oauthBase(store)}/token`, {
     method: 'POST',
     headers: { 'content-type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({
-      grant_type: 'client_credentials',
-      client_id: env('IKAS_CLIENT_ID'),
-      client_secret: env('IKAS_CLIENT_SECRET'),
-    }),
+    body: new URLSearchParams(body),
   });
-  if (!res.ok) throw new Error(`ikas token hatası: HTTP ${res.status} (mağaza: ${store}, client_id: ${env('IKAS_CLIENT_ID').slice(0, 8)}…, secret uzunluğu: ${env('IKAS_CLIENT_SECRET').length}) ${await res.text()}`);
-  const j = await res.json();
-  token = j.access_token;
-  tokenExp = Date.now() + (j.expires_in || 14400) * 1000;
-  return token;
+  const text = await res.text();
+  if (!res.ok) throw new Error(`ikas token hatası (${store}, ${body.grant_type}): HTTP ${res.status} ${text.slice(0, 300)}`);
+  return JSON.parse(text);
 }
 
-export async function gql(query, variables = {}) {
+const ccCache = new Map(); // client_credentials token önbelleği
+
+async function getToken(store) {
+  const row = db.prepare('SELECT * FROM stores WHERE store_name = ? AND uninstalled_at IS NULL').get(store);
+  if (row) {
+    if (row.access_token && Date.now() < row.expires_at - 60_000) return row.access_token;
+    const j = await tokenRequest(store, { grant_type: 'refresh_token', refresh_token: row.refresh_token, ...appCreds() });
+    db.prepare('UPDATE stores SET access_token = ?, refresh_token = COALESCE(?, refresh_token), expires_at = ? WHERE store_name = ?')
+      .run(j.access_token, j.refresh_token || null, Date.now() + (j.expires_in || 14400) * 1000, store);
+    return j.access_token;
+  }
+  if (store !== defaultStore() || !env('IKAS_CLIENT_ID') || !env('IKAS_CLIENT_SECRET')) {
+    throw new Error(`"${store}" mağazası için yetki yok; uygulamayı ikas'tan kurun`);
+  }
+  const c = ccCache.get(store);
+  if (c && Date.now() < c.exp - 60_000) return c.token;
+  const j = await tokenRequest(store, { grant_type: 'client_credentials', client_id: env('IKAS_CLIENT_ID'), client_secret: env('IKAS_CLIENT_SECRET') });
+  ccCache.set(store, { token: j.access_token, exp: Date.now() + (j.expires_in || 14400) * 1000 });
+  return j.access_token;
+}
+
+export async function gql(query, variables = {}, { token } = {}) {
   if (MOCK) return mock(query, variables);
   const res = await fetch(API, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${await getToken()}` },
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token || await getToken(currentStore())}` },
     body: JSON.stringify({ query, variables }),
   });
   const j = await res.json().catch(() => ({}));
@@ -49,13 +62,14 @@ const PRODUCT_FIELDS = `id name metaData { slug } variants { id sku isActive
   variantValueIds { variantValueId } prices { sellPrice discountPrice priceListId } }`;
 
 // Varyant değer adları (Renk: Siyah vb.) ayrı sorgudan gelir; 10 dk önbelleklenir.
-let vvCache = null, vvAt = 0;
+const vvCache = new Map(); // mağaza -> { at, names }
 async function variantValueNames() {
-  if (vvCache && Date.now() - vvAt < 600_000) return vvCache;
+  const store = currentStore(), c = vvCache.get(store);
+  if (c && Date.now() - c.at < 600_000) return c.names;
   const d = await gql('{ listVariantType { values { id name } } }');
-  vvCache = new Map(d.listVariantType.flatMap((t) => t.values.map((v) => [v.id, v.name])));
-  vvAt = Date.now();
-  return vvCache;
+  const names = new Map(d.listVariantType.flatMap((t) => t.values.map((v) => [v.id, v.name])));
+  vvCache.set(store, { at: Date.now(), names });
+  return names;
 }
 
 function normalizeProduct(p, names) {
@@ -136,6 +150,7 @@ const MOCK_PRODUCTS = [
 ];
 let mockOrderNo = 1000;
 function mock(query, v) {
+  if (query.includes('getMerchant')) return { getMerchant: { id: 'mock-merchant', storeName: 'mock' }, me: { id: 'mock-app' } };
   if (query.includes('createOrderWithTransactions')) {
     if (process.env.IKAS_MOCK_FAIL === '1') throw new Error('mock: sipariş oluşturulamadı');
     mockOrderNo++;

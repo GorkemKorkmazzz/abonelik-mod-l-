@@ -3,6 +3,7 @@ import express from 'express';
 import { getSettings } from './db.js';
 import { trDate, today, addDays } from './dates.js';
 import * as S from './subscriptions.js';
+import { runInStore } from './context.js';
 
 export const manageRouter = express.Router();
 manageRouter.use(express.urlencoded({ extended: false }));
@@ -40,7 +41,7 @@ ${live ? `
 manageRouter.use('/:token', (req, res, next) => {
   const sub = S.getSub('token', req.params.token);
   if (!sub) return res.status(404).send('Abonelik bulunamadı');
-  req.sub = sub; next();
+  req.sub = sub; runInStore(sub.store, next);
 });
 manageRouter.get('/:token', (req, res) => {
   if (!req.originalUrl.split('?')[0].endsWith('/')) return res.redirect(req.originalUrl.split('?')[0] + '/');

@@ -7,6 +7,7 @@
   var me = document.currentScript || document.querySelector('script[src*="/widget.js"]');
   var BASE = (window.ABONELIK_API || (me && me.src ? new URL(me.src).origin : location.origin)).replace(/\/$/, '');
   var cfg = null, root = null, lastPath = null, mode = 'one', hiddenEls = [];
+  var STORE = window.ABONELIK_STORE || (me && me.src ? new URL(me.src).searchParams.get('store') : '') || '';
 
   var esc = function (s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); };
   var tl = function (n) { return new Intl.NumberFormat('tr-TR', { style: 'currency', currency: 'TRY' }).format(n); };
@@ -24,6 +25,7 @@
     '.abn-err{color:#b3261e;font-size:14px;min-height:18px}.abn-x{float:right;background:none;border:0;font-size:22px;cursor:pointer}.abn-ok{text-align:center;padding:10px}';
 
   function api(path, body) {
+    path += (path.indexOf('?') === -1 ? '?' : '&') + 'store=' + encodeURIComponent(STORE);
     return fetch(BASE + '/api/public' + path, body ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) } : undefined)
       .then(function (r) { return r.json().then(function (j) { if (!r.ok) throw new Error(j.error || 'Hata'); return j; }); });
   }

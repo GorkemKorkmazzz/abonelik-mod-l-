@@ -10,7 +10,7 @@ const { server } = await import('../src/server.js');
 const { db } = await import('../src/db.js');
 const S = await import('../src/subscriptions.js');
 const B = 'http://localhost:3999';
-const auth = { Authorization: 'Basic ' + Buffer.from('a:test').toString('base64'), 'Content-Type': 'application/json' };
+let auth = { 'Content-Type': 'application/json' };
 const j = async (r) => { const b = await r.json(); if (!r.ok) throw new Error(b.error); return b; };
 
 test('tarih hesapları', () => {
@@ -22,6 +22,11 @@ test('tarih hesapları', () => {
 test('uçtan uca akış', async (t) => {
   t.after(() => server.close());
   assert.equal((await fetch(B + '/api/admin/settings')).status, 401);
+  const lg = await fetch(B + '/login', { method: 'POST', redirect: 'manual', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'password=test' });
+  assert.equal(lg.status, 302);
+  auth.Cookie = lg.headers.get('set-cookie').split(';')[0];
+  assert.equal((await j(await fetch(B + '/api/admin/me', { headers: auth }))).store, 'mock');
+  assert.equal((await fetch(B + '/api/public/config?slug=x&store=baska-magaza')).status, 404);
   // periyot düzenle
   const s = await j(await fetch(B + '/api/admin/settings', { method: 'PUT', headers: auth, body: JSON.stringify({
     periods: [{ id: 'w1', label: 'Haftalık', unit: 'week', interval: 1 }, { id: 'm1', label: 'Aylık', unit: 'month', interval: 1 }],

@@ -6,6 +6,7 @@
 import nodemailer from 'nodemailer';
 import { db, getSettings } from './db.js';
 import { trDate } from './dates.js';
+import { currentStore } from './context.js';
 
 const MODE = process.env.MAIL_MODE || 'smtp';
 const transport = process.env.SMTP_HOST
@@ -29,7 +30,7 @@ async function send(to, subject, html) {
       status = 'sent';
     } catch (e) { status = 'failed'; error = e.message; }
   }
-  db.prepare('INSERT INTO mail_log (recipient, subject, html, status, error) VALUES (?, ?, ?, ?, ?)').run(to, subject, html, status, error);
+  db.prepare('INSERT INTO mail_log (store, recipient, subject, html, status, error) VALUES (?, ?, ?, ?, ?, ?)').run(currentStore(), to, subject, html, status, error);
   if (status === 'failed') console.error('[mail] gönderilemedi:', to, error);
   return status;
 }

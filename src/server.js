@@ -6,6 +6,7 @@ import * as ikas from './ikas.js';
 import * as S from './subscriptions.js';
 import { manageRouter } from './manage.js';
 import * as mail from './mailer.js';
+import { env, runInStore, defaultStore, isStoreName } from './context.js';
 
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
@@ -20,7 +21,9 @@ const pub = express.Router();
 pub.use((req, res, next) => {
   res.set({ 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': 'Content-Type', 'Access-Control-Allow-Methods': 'GET,POST,OPTIONS' });
   if (req.method === 'OPTIONS') return res.sendStatus(204);
-  next();
+  const store = String(req.query.store || req.body?.store || defaultStore());
+  if (!knownStore(store)) return res.status(404).json({ error: 'Mağaza bulunamadı' });
+  runInStore(store, next);
 });
 
 pub.get('/config', wrap((req, res) => {
@@ -48,30 +51,44 @@ app.get('/widget.js', (req, res) => {
 // ---------- Müşteri abonelik yönetim sayfası ----------
 app.use('/s', manageRouter);
 
-// ---------- Satıcı paneli (giriş formu + çerez; Basic Auth da kabul edilir) ----------
+// ---------- Mağazalar ve oturum ----------
+const activeStore = (store) => db.prepare('SELECT * FROM stores WHERE store_name = ? AND uninstalled_at IS NULL').get(store);
+const knownStore = (store) => isStoreName(store) && (store === defaultStore() || !!activeStore(store));
+
 const sha = (s) => crypto.createHash('sha256').update(String(s)).digest();
 const same = (x, y) => crypto.timingSafeEqual(sha(x), sha(y));
-// Oturum çerezi şifreden türetilir: şifre değişince tüm oturumlar düşer.
-const sessionValue = () => crypto.createHmac('sha256', process.env.ADMIN_PASSWORD).update('abonelik-panel').digest('base64url');
+const SESSION_SECRET = () => env('SESSION_SECRET') || env('IKAS_APP_CLIENT_SECRET') || env('ADMIN_PASSWORD') || 'dev';
+const SESSION_TTL = 60 * 60 * 24 * 14;
+
+/** "mağaza.bitişZamanı.imza" biçiminde oturum anahtarı. ikas içindeki iframe'de çerez engellenebildiği için başlıkla da gönderilir. */
+function makeSession(store) {
+  const body = `${store}.${Math.floor(Date.now() / 1000) + SESSION_TTL}`;
+  return `${body}.${crypto.createHmac('sha256', SESSION_SECRET()).update(body).digest('base64url')}`;
+}
+function readSession(tok) {
+  const [store, exp, sig] = String(tok || '').split('.');
+  if (!store || !exp || !sig) return null;
+  const good = crypto.createHmac('sha256', SESSION_SECRET()).update(`${store}.${exp}`).digest('base64url');
+  if (!same(sig, good) || Number(exp) < Date.now() / 1000 || !knownStore(store)) return null;
+  return store;
+}
 const cookie = (req) => Object.fromEntries((req.headers.cookie || '').split(';').map((c) => c.trim().split('=')).filter((p) => p[1]))['abn_sess'];
+const setCookie = (req, res, tok) => res.set('Set-Cookie', `abn_sess=${tok}; HttpOnly; Path=/; Max-Age=${SESSION_TTL}; ${req.secure ? 'SameSite=None; Secure' : 'SameSite=Lax'}`);
 
 function adminAuth(req, res, next) {
-  const pass = process.env.ADMIN_PASSWORD;
-  if (!pass) return res.status(500).send('ADMIN_PASSWORD tanımlı değil');
-  if (cookie(req) && same(cookie(req), sessionValue())) return next();
-  const [, b64] = (req.headers.authorization || '').split(' ');
-  const [, given = ''] = Buffer.from(b64 || '', 'base64').toString().split(':');
-  if (b64 && same(given, pass)) return next();
+  const store = readSession(req.get('x-abn-session')) || readSession(req.query.t) || readSession(cookie(req));
+  if (store) { req.store = store; return runInStore(store, next); }
   if (req.method === 'GET' && !req.originalUrl.startsWith('/api/')) return res.redirect('/login');
-  res.status(401).json({ error: 'Oturum süresi doldu, tekrar giriş yapın' });
+  res.status(401).json({ error: 'Oturum süresi doldu; uygulamayı ikas panelinden yeniden açın' });
 }
 
 const loginPage = (err = '') => `<!doctype html><html lang="tr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Abonelik Paneli · Giriş</title><style>body{font-family:system-ui,Arial,sans-serif;background:#f5f6f4;display:flex;min-height:100vh;align-items:center;justify-content:center;margin:0;padding:16px}
 form{background:#fff;padding:28px;border-radius:12px;box-shadow:0 1px 4px #0002;width:100%;max-width:340px}h1{font-size:18px;margin:0 0 16px;color:#2f6b3a}
-input{width:100%;box-sizing:border-box;padding:10px;border:1px solid #ccc;border-radius:8px;margin-bottom:12px;font:inherit}
+input{width:100%;box-sizing:border-box;padding:10px;border:1px solid #ccc;border-radius:8px;margin-bottom:12px;font:inherit}p{color:#666;font-size:13px}
 button{width:100%;padding:11px;background:#2f6b3a;color:#fff;border:0;border-radius:8px;font:inherit;cursor:pointer}.e{color:#b3261e;font-size:14px;margin-bottom:10px}</style></head>
 <body><form method="post" action="/login"><h1>Abonelik Paneli</h1>${err ? `<div class="e">${err}</div>` : ''}
+<p>ikas mağazanızdan açtığınızda giriş otomatik yapılır. Doğrudan erişim için yönetici şifresi:</p>
 <input type="password" name="password" placeholder="Şifre" autofocus required><button>Giriş yap</button></form></body></html>`;
 
 const loginTries = new Map();
@@ -79,14 +96,86 @@ app.get('/login', (req, res) => res.send(loginPage()));
 app.post('/login', express.urlencoded({ extended: false }), (req, res) => {
   const now = Date.now(), list = (loginTries.get(req.ip) || []).filter((t) => now - t < 600_000);
   if (list.length >= 10) return res.status(429).send(loginPage('Çok fazla deneme, 10 dakika sonra tekrar deneyin.'));
-  if (!process.env.ADMIN_PASSWORD || !same(req.body?.password || '', process.env.ADMIN_PASSWORD)) {
+  if (!env('ADMIN_PASSWORD') || !defaultStore() || !same(req.body?.password || '', env('ADMIN_PASSWORD'))) {
     loginTries.set(req.ip, [...list, now]);
     return res.status(401).send(loginPage('Şifre hatalı.'));
   }
-  const secure = req.secure ? '; Secure' : '';
-  res.set('Set-Cookie', `abn_sess=${sessionValue()}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${60 * 60 * 24 * 14}${secure}`).redirect('/admin');
+  setCookie(req, res, makeSession(defaultStore())).redirect('/admin');
 });
 app.get('/logout', (req, res) => res.set('Set-Cookie', 'abn_sess=; Path=/; Max-Age=0').redirect('/login'));
+
+// ---------- ikas partner kurulumu (OAuth) ----------
+const REDIRECT_URI = () => `${PUBLIC_URL}/oauth/callback`;
+const states = new Map(); // state -> { store, exp }
+
+function startOAuth(res, store) {
+  const { client_id } = ikas.appCreds();
+  if (!client_id) return res.status(500).send('IKAS_APP_CLIENT_ID tanımlı değil');
+  const state = crypto.randomBytes(16).toString('hex');
+  states.set(state, { store, exp: Date.now() + 10 * 60_000 });
+  for (const [k, v] of states) if (v.exp < Date.now()) states.delete(k);
+  const q = new URLSearchParams({ client_id, redirect_uri: REDIRECT_URI(), scope: ikas.APP_SCOPES, state });
+  res.redirect(`${ikas.oauthBase(store)}/authorize?${q}`);
+}
+
+/** ikas'ın uygulamayı açarken eklediği imzayı doğrular: storeName+merchantId+timestamp, uygulama secret'ı ile HMAC-SHA256. */
+function validAdminSignature(q) {
+  const secret = ikas.appCreds().client_secret;
+  if (!secret || !q.signature) return false;
+  const h = crypto.createHmac('sha256', secret).update(`${q.storeName}${q.merchantId}${q.timestamp}`);
+  const d = h.digest();
+  return [d.toString('hex'), d.toString('base64'), d.toString('base64url')].some((x) => same(x, q.signature));
+}
+
+// Kurulum Adresi: ikas hem kurulumda (?storeName=) hem panelden açılışta (imzalı parametrelerle) buraya yönlendirir.
+app.get('/', (req, res) => {
+  const q = Object.fromEntries(Object.entries(req.query).map(([k, v]) => [k, String(v)]));
+  if (!q.storeName) return res.redirect('/admin');
+  if (!isStoreName(q.storeName)) return res.status(400).send('Geçersiz mağaza adı');
+  const row = activeStore(q.storeName);
+  if (q.signature && row) {
+    if (!validAdminSignature(q) || (row.merchant_id && q.merchantId !== row.merchant_id)) {
+      console.warn('[oauth] imza doğrulanamadı', { storeName: q.storeName, merchantId: q.merchantId, timestamp: q.timestamp });
+      return res.status(401).send('İmza doğrulanamadı. Uygulamayı ikas panelinden yeniden açın.');
+    }
+    const tok = makeSession(q.storeName);
+    return setCookie(req, res, tok).redirect(`/admin?t=${encodeURIComponent(tok)}`);
+  }
+  startOAuth(res, q.storeName);
+});
+
+app.get('/oauth/callback', wrap(async (req, res) => {
+  const { code, state } = req.query;
+  const st = states.get(String(state));
+  states.delete(String(state));
+  if (!code || !st || st.exp < Date.now()) return res.status(400).send('Kurulum oturumu geçersiz veya süresi doldu. Uygulamayı ikas\'tan yeniden yükleyin.');
+  const store = st.store;
+  if (req.query.storeName && req.query.storeName !== store) return res.status(400).send('Mağaza eşleşmedi');
+  const j = await ikas.tokenRequest(store, { grant_type: 'authorization_code', code: String(code), redirect_uri: REDIRECT_URI(), ...ikas.appCreds() });
+  const d = await ikas.gql('{ getMerchant { id storeName } me { id } }', {}, { token: j.access_token });
+  db.prepare(`INSERT INTO stores (store_name, merchant_id, authorized_app_id, access_token, refresh_token, expires_at, scope, installed_at, uninstalled_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), NULL) ON CONFLICT(store_name) DO UPDATE SET merchant_id=excluded.merchant_id,
+    authorized_app_id=excluded.authorized_app_id, access_token=excluded.access_token, refresh_token=excluded.refresh_token,
+    expires_at=excluded.expires_at, scope=excluded.scope, uninstalled_at=NULL`)
+    .run(store, d.getMerchant?.id || null, d.me?.id || null, j.access_token, j.refresh_token || null,
+      Date.now() + (j.expires_in || 14400) * 1000, j.scope || ikas.APP_SCOPES);
+  console.log('[oauth] kuruldu:', store);
+  res.redirect(d.me?.id ? `https://${store}.myikas.com/admin/authorized-app/${d.me.id}` : `/admin?t=${encodeURIComponent(makeSession(store))}`);
+}));
+
+// Partner panelindeki "Webhook Adresi": ödeme ve silinme bildirimleri.
+app.post('/webhooks/ikas', (req, res) => {
+  const b = req.body || {};
+  console.log('[webhook]', JSON.stringify(b).slice(0, 1000));
+  const store = b.storeName || b.data?.storeName;
+  const merchantId = b.merchantId || b.data?.merchantId;
+  if (/uninstall|delete|remove/i.test(JSON.stringify(b.type || b.scope || b.event || '')) && (store || merchantId)) {
+    db.prepare("UPDATE stores SET uninstalled_at = datetime('now'), access_token = NULL, refresh_token = NULL WHERE store_name = ? OR merchant_id = ?")
+      .run(store || '', merchantId || '');
+  }
+  res.sendStatus(200);
+});
+
 const admin = express.Router();
 admin.use(adminAuth);
 
@@ -118,31 +207,31 @@ admin.get('/ikas/meta', wrap(async (req, res) => res.json(await ikas.listMeta())
 admin.get('/ikas/products', wrap(async (req, res) =>
   res.json(await ikas.listProducts({ page: Number(req.query.page) || 1, search: req.query.search || undefined }))));
 
-admin.get('/products', (req, res) => res.json(db.prepare('SELECT * FROM products ORDER BY name').all().map(parseRow)));
+admin.get('/products', (req, res) => res.json(db.prepare('SELECT * FROM products WHERE store = ? ORDER BY name').all(req.store).map(parseRow)));
 admin.put('/products/:id', wrap(async (req, res) => {
   const b = req.body || {};
   const live = await ikas.getProduct(req.params.id);
   if (!live) throw new Error('Ürün ikas\'ta bulunamadı');
   const discount = b.discountPercent === '' || b.discountPercent == null ? null : Number(b.discountPercent);
   if (discount != null && !(discount >= 0 && discount < 100)) throw new Error('İndirim 0-99 arası olmalı');
-  db.prepare(`INSERT INTO products (product_id, name, slug, enabled, discount_percent, period_ids, variants, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now')) ON CONFLICT(product_id) DO UPDATE SET name=excluded.name, slug=excluded.slug,
+  db.prepare(`INSERT INTO products (store, product_id, name, slug, enabled, discount_percent, period_ids, variants, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now')) ON CONFLICT(store, product_id) DO UPDATE SET name=excluded.name, slug=excluded.slug,
     enabled=excluded.enabled, discount_percent=excluded.discount_percent, period_ids=excluded.period_ids, variants=excluded.variants, updated_at=excluded.updated_at`)
-    .run(live.id, live.name, live.slug, b.enabled ? 1 : 0, discount,
+    .run(req.store, live.id, live.name, live.slug, b.enabled ? 1 : 0, discount,
       Array.isArray(b.periodIds) && b.periodIds.length ? JSON.stringify(b.periodIds) : null, JSON.stringify(live.variants));
-  res.json(parseRow(db.prepare('SELECT * FROM products WHERE product_id = ?').get(live.id)));
+  res.json(parseRow(db.prepare('SELECT * FROM products WHERE store = ? AND product_id = ?').get(req.store, live.id)));
 }));
-admin.delete('/products/:id', (req, res) => { db.prepare('DELETE FROM products WHERE product_id = ?').run(req.params.id); res.json({ ok: true }); });
+admin.delete('/products/:id', (req, res) => { db.prepare('DELETE FROM products WHERE store = ? AND product_id = ?').run(req.store, req.params.id); res.json({ ok: true }); });
 
 admin.get('/subscriptions', (req, res) => {
   const st = req.query.status;
-  const rows = st ? db.prepare('SELECT * FROM subscriptions WHERE status = ? ORDER BY id DESC').all(st)
-    : db.prepare('SELECT * FROM subscriptions ORDER BY id DESC').all();
+  const rows = st ? db.prepare('SELECT * FROM subscriptions WHERE store = ? AND status = ? ORDER BY id DESC').all(req.store, st)
+    : db.prepare('SELECT * FROM subscriptions WHERE store = ? ORDER BY id DESC').all(req.store);
   res.json(rows.map(parseRow).map(({ token, ...r }) => ({ ...r, manageUrl: `${PUBLIC_URL}/s/${token}` })));
 });
 admin.post('/subscriptions/:id/:action', wrap(async (req, res) => {
   const sub = S.getSub('id', Number(req.params.id));
-  if (!sub) throw new Error('Abonelik bulunamadı');
+  if (!sub || sub.store !== req.store) throw new Error('Abonelik bulunamadı');
   const a = req.params.action;
   if (a === 'cancel') return res.json(await S.cancel(sub));
   if (a === 'pause') return res.json(S.setPaused(sub, true));
@@ -159,8 +248,8 @@ admin.post('/subscriptions/:id/:action', wrap(async (req, res) => {
 }));
 
 admin.get('/orders', (req, res) => res.json(db.prepare(`SELECT o.*, s.product_name, json_extract(s.customer, '$.email') AS email
-  FROM orders o JOIN subscriptions s ON s.id = o.subscription_id ORDER BY o.id DESC LIMIT 500`).all()));
-admin.get('/mails', (req, res) => res.json(db.prepare('SELECT * FROM mail_log ORDER BY id DESC LIMIT 200').all()));
+  FROM orders o JOIN subscriptions s ON s.id = o.subscription_id WHERE s.store = ? ORDER BY o.id DESC LIMIT 500`).all(req.store)));
+admin.get('/mails', (req, res) => res.json(db.prepare('SELECT * FROM mail_log WHERE store = ? ORDER BY id DESC LIMIT 200').all(req.store)));
 admin.post('/test-mail', wrap(async (req, res) => {
   const to = String(req.body?.to || '').trim();
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(to)) throw new Error('Geçerli bir e-posta girin');
@@ -170,18 +259,19 @@ admin.post('/test-mail', wrap(async (req, res) => {
   res.json({ ok: true });
 }));
 admin.post('/run', wrap(async (req, res) => res.json(await S.runDue())));
+admin.get('/me', (req, res) => res.json({ store: req.store }));
 
 admin.post('/install-script', wrap(async (req, res) => {
   const storefrontId = req.body?.storefrontId || getSettings().storefrontId;
   if (!storefrontId) throw new Error('Storefront seçin');
   saveSettings({ storefrontId });
-  const scriptContent = `(function(){var s=document.createElement('script');s.src=${JSON.stringify(PUBLIC_URL + '/widget.js')};s.async=true;document.head.appendChild(s);})();`;
+  const scriptContent = `(function(){var s=document.createElement('script');s.src=${JSON.stringify(`${PUBLIC_URL}/widget.js?store=${encodeURIComponent(req.store)}`)};s.async=true;document.head.appendChild(s);})();`;
   res.json(await ikas.saveStorefrontScript({ storefrontId, scriptContent }));
 }));
 
 app.use('/api/admin', admin);
 app.get('/health', (req, res) => res.json({ ok: true }));
-app.get(['/', '/admin'], adminAuth, (req, res) => res.sendFile(path.resolve('public/admin.html')));
+app.get('/admin', adminAuth, (req, res) => res.sendFile(path.resolve('public/admin.html')));
 app.get('/demo', (req, res) => res.sendFile(path.resolve('public/demo.html')));
 
 // ---------- Zamanlayıcı ----------

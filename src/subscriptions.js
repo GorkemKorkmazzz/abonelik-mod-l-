@@ -3,6 +3,7 @@ import { db, getSettings, parseRow } from './db.js';
 import { today, addDays, addPeriod, isDate } from './dates.js';
 import * as ikas from './ikas.js';
 import * as mail from './mailer.js';
+import { currentStore, runInStore } from './context.js';
 
 const round2 = (n) => Math.round(n * 100) / 100;
 
@@ -17,7 +18,7 @@ export function productConfig(row, settings = getSettings()) {
 }
 
 export const findProductBySlug = (slug) =>
-  db.prepare('SELECT * FROM products WHERE enabled = 1 AND slug = ?').get(String(slug).replace(/^\/+|\/+$/g, ''));
+  db.prepare('SELECT * FROM products WHERE store = ? AND enabled = 1 AND slug = ?').get(currentStore(), String(slug).replace(/^\/+|\/+$/g, ''));
 
 export const getSub = (where, val) => parseRow(db.prepare(`SELECT * FROM subscriptions WHERE ${where} = ?`).get(val));
 
@@ -30,7 +31,7 @@ const req = (v, name, max = 200) => {
 export async function createSubscription(body) {
   const settings = getSettings();
   const row = body.productId
-    ? db.prepare('SELECT * FROM products WHERE enabled = 1 AND product_id = ?').get(String(body.productId))
+    ? db.prepare('SELECT * FROM products WHERE store = ? AND enabled = 1 AND product_id = ?').get(currentStore(), String(body.productId))
     : findProductBySlug(body.slug || '');
   if (!row) throw new Error('Bu ürün için düzenli teslimat aktif değil');
   const cfg = productConfig(row, settings);
@@ -55,9 +56,9 @@ export async function createSubscription(body) {
 
   const token = crypto.randomBytes(24).toString('base64url');
   const { lastInsertRowid } = db.prepare(`INSERT INTO subscriptions
-    (token, product_id, product_name, variant_id, variant_name, quantity, discount_percent, period, start_date, next_date, customer, address)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
-    token, cfg.productId, cfg.name, variant.id, cfg.variants.length > 1 ? variant.name : null, qty, cfg.discountPercent,
+    (store, token, product_id, product_name, variant_id, variant_name, quantity, discount_percent, period, start_date, next_date, customer, address)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+    currentStore(), token, cfg.productId, cfg.name, variant.id, cfg.variants.length > 1 ? variant.name : null, qty, cfg.discountPercent,
     JSON.stringify(period), start, start, JSON.stringify(customer), JSON.stringify(address));
   const sub = getSub('id', lastInsertRowid);
   await mail.sendWelcome(sub);
@@ -76,7 +77,7 @@ export async function processSubscription(sub) {
   try {
     // Fiyat her siparişte ikas'tan güncel çekilir; ürün bulunamazsa kayıtlı fiyat kullanılır.
     const live = await ikas.getProduct(sub.product_id).catch(() => null);
-    const stored = parseRow(db.prepare('SELECT variants FROM products WHERE product_id = ?').get(sub.product_id))?.variants || [];
+    const stored = parseRow(db.prepare('SELECT variants FROM products WHERE store = ? AND product_id = ?').get(sub.store, sub.product_id))?.variants || [];
     const v = live?.variants.find((x) => x.id === sub.variant_id) || stored.find((x) => x.id === sub.variant_id);
     if (!v) throw new Error('Ürün varyantı bulunamadı (silinmiş/pasif olabilir)');
     const unit = round2(v.price * (1 - sub.discount_percent / 100));
@@ -144,7 +145,7 @@ export function postpone(sub, newDate) {
 }
 
 export function periodsFor(productId) {
-  const row = db.prepare('SELECT * FROM products WHERE product_id = ?').get(productId);
+  const row = db.prepare('SELECT * FROM products WHERE store = ? AND product_id = ?').get(currentStore(), productId);
   return row ? productConfig(row).periods : getSettings().periods;
 }
 
@@ -181,14 +182,14 @@ export async function runDue() {
   try {
     const t = today();
     const due = db.prepare("SELECT * FROM subscriptions WHERE status = 'active' AND next_date <= ? ORDER BY next_date").all(t).map(parseRow);
-    for (const s of due) (await processSubscription(s)) ? stats.orders++ : stats.failed++;
+    for (const s of due) (await runInStore(s.store, () => processSubscription(s))) ? stats.orders++ : stats.failed++;
 
     const days = Number(getSettings().reminderDaysBefore) || 0;
     if (days > 0) {
       const upcoming = db.prepare(`SELECT * FROM subscriptions WHERE status = 'active' AND next_date > ? AND next_date <= ?
         AND (reminded_for IS NULL OR reminded_for <> next_date)`).all(t, addDays(t, days)).map(parseRow);
       for (const s of upcoming) {
-        await mail.sendReminder(s);
+        await runInStore(s.store, () => mail.sendReminder(s));
         db.prepare('UPDATE subscriptions SET reminded_for = next_date WHERE id = ?').run(s.id);
         stats.reminders++;
       }
