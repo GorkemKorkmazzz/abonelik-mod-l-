@@ -106,14 +106,29 @@ app.get('/logout', (req, res) => res.set('Set-Cookie', 'abn_sess=; Path=/; Max-A
 
 // ---------- ikas partner kurulumu (OAuth) ----------
 const REDIRECT_URI = () => `${PUBLIC_URL}/oauth/callback`;
-const states = new Map(); // state -> { store, exp }
+// state sunucu belleğinde değil imzalı tutulur: yeniden başlatma/deploy sırasında kurulum bozulmasın.
+const signState = (store, exp, nonce) => crypto.createHmac('sha256', SESSION_SECRET()).update(`oauth.${store}.${exp}.${nonce}`).digest('base64url');
+function makeState(store) {
+  const exp = Math.floor(Date.now() / 1000) + 30 * 60, nonce = crypto.randomBytes(8).toString('hex');
+  return `${store}.${exp}.${nonce}.${signState(store, exp, nonce)}`;
+}
+function readState(state) {
+  const [store, exp, nonce, sig] = String(state || '').split('.');
+  if (!store || !exp || !nonce || !sig || Number(exp) < Date.now() / 1000) return null;
+  return same(sig, signState(store, exp, nonce)) ? store : null;
+}
+/** ikas callback imzası (varsa): code'un uygulama secret'ı ile HMAC-SHA256'sı. */
+function validCodeSignature(code, signature) {
+  const secret = ikas.appCreds().client_secret;
+  if (!secret || !code || !signature) return false;
+  const d = crypto.createHmac('sha256', secret).update(String(code)).digest();
+  return [d.toString('hex'), d.toString('base64'), d.toString('base64url')].some((x) => same(x, String(signature)));
+}
 
 function startOAuth(res, store) {
   const { client_id } = ikas.appCreds();
   if (!client_id) return res.status(500).send('IKAS_APP_CLIENT_ID tanımlı değil');
-  const state = crypto.randomBytes(16).toString('hex');
-  states.set(state, { store, exp: Date.now() + 10 * 60_000 });
-  for (const [k, v] of states) if (v.exp < Date.now()) states.delete(k);
+  const state = makeState(store);
   const q = new URLSearchParams({ client_id, redirect_uri: REDIRECT_URI(), scope: ikas.APP_SCOPES, state });
   res.redirect(`${ikas.oauthBase(store)}/authorize?${q}`);
 }
@@ -145,12 +160,16 @@ app.get('/', (req, res) => {
 });
 
 app.get('/oauth/callback', wrap(async (req, res) => {
-  const { code, state } = req.query;
-  const st = states.get(String(state));
-  states.delete(String(state));
-  if (!code || !st || st.exp < Date.now()) return res.status(400).send('Kurulum oturumu geçersiz veya süresi doldu. Uygulamayı ikas\'tan yeniden yükleyin.');
-  const store = st.store;
-  if (req.query.storeName && req.query.storeName !== store) return res.status(400).send('Mağaza eşleşmedi');
+  const { code, state, storeName, signature } = req.query;
+  console.log('[oauth] callback', { params: Object.keys(req.query), storeName, hasState: !!state, hasSignature: !!signature });
+  let store = readState(state);
+  // ikas kurulumu kendi başlattıysa state bizim değildir; o durumda ikas'ın code imzasına güvenilir.
+  if (!store && isStoreName(storeName) && validCodeSignature(code, signature)) store = String(storeName);
+  if (!code || !store) {
+    console.warn('[oauth] callback reddedildi', { storeName, stateOk: !!readState(state), signatureOk: validCodeSignature(code, signature) });
+    return res.status(400).send('Kurulum oturumu geçersiz veya süresi doldu. Uygulamayı ikas\'tan yeniden yükleyin.');
+  }
+  if (storeName && storeName !== store) return res.status(400).send('Mağaza eşleşmedi');
   const j = await ikas.tokenRequest(store, { grant_type: 'authorization_code', code: String(code), redirect_uri: REDIRECT_URI(), ...ikas.appCreds() });
   const d = await ikas.gql('{ getMerchant { id storeName } me { id } }', {}, { token: j.access_token });
   db.prepare(`INSERT INTO stores (store_name, merchant_id, authorized_app_id, access_token, refresh_token, expires_at, scope, installed_at, uninstalled_at)
