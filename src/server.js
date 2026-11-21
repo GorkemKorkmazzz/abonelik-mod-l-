@@ -163,8 +163,10 @@ app.get('/oauth/callback', wrap(async (req, res) => {
   const { code, state, storeName, signature } = req.query;
   console.log('[oauth] callback', { params: Object.keys(req.query), storeName, hasState: !!state, hasSignature: !!signature });
   let store = readState(state);
-  // ikas kurulumu kendi başlattıysa state bizim değildir; o durumda ikas'ın code imzasına güvenilir.
-  if (!store && isStoreName(storeName) && validCodeSignature(code, signature)) store = String(storeName);
+  // ikas kurulumu kendisi başlatınca yalnızca code + storeName gönderir (state/imza yok; Railway loglarıyla doğrulandı).
+  // code yalnızca bu mağazanın token adresinde, uygulamanın client_secret'ı ile değiştirilebildiği için yeterli güvencedir.
+  // İmza gelirse yine de doğrulanır.
+  if (!store && isStoreName(storeName) && (!signature || validCodeSignature(code, signature)) && !state) store = String(storeName);
   if (!code || !store) {
     console.warn('[oauth] callback reddedildi', { storeName, stateOk: !!readState(state), signatureOk: validCodeSignature(code, signature) });
     return res.status(400).send('Kurulum oturumu geçersiz veya süresi doldu. Uygulamayı ikas\'tan yeniden yükleyin.');
