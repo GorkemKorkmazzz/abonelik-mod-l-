@@ -5,10 +5,13 @@ const API = process.env.IKAS_API_URL || 'https://api.myikas.com/api/v1/admin/gra
 
 let token = null, tokenExp = 0;
 
+// Panellere yapıştırılan değerlerde kalan boşluk/tırnakları temizle.
+const env = (k) => String(process.env[k] || '').trim().replace(/^["']|["']$/g, '').trim();
+
 async function getToken() {
   if (token && Date.now() < tokenExp - 60_000) return token;
-  const store = process.env.IKAS_STORE_NAME;
-  if (!store || !process.env.IKAS_CLIENT_ID || !process.env.IKAS_CLIENT_SECRET) {
+  const store = env('IKAS_STORE_NAME');
+  if (!store || !env('IKAS_CLIENT_ID') || !env('IKAS_CLIENT_SECRET')) {
     throw new Error('IKAS_STORE_NAME / IKAS_CLIENT_ID / IKAS_CLIENT_SECRET tanımlı değil');
   }
   const res = await fetch(`https://${store}.myikas.com/api/admin/oauth/token`, {
@@ -16,11 +19,11 @@ async function getToken() {
     headers: { 'content-type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({
       grant_type: 'client_credentials',
-      client_id: process.env.IKAS_CLIENT_ID,
-      client_secret: process.env.IKAS_CLIENT_SECRET,
+      client_id: env('IKAS_CLIENT_ID'),
+      client_secret: env('IKAS_CLIENT_SECRET'),
     }),
   });
-  if (!res.ok) throw new Error(`ikas token hatası: HTTP ${res.status} ${await res.text()}`);
+  if (!res.ok) throw new Error(`ikas token hatası: HTTP ${res.status} (mağaza: ${store}, client_id: ${env('IKAS_CLIENT_ID').slice(0, 8)}…, secret uzunluğu: ${env('IKAS_CLIENT_SECRET').length}) ${await res.text()}`);
   const j = await res.json();
   token = j.access_token;
   tokenExp = Date.now() + (j.expires_in || 14400) * 1000;
