@@ -39,7 +39,8 @@ export async function gql(query, variables = {}) {
   });
   const j = await res.json().catch(() => ({}));
   if (!res.ok || j.errors?.length) {
-    throw new Error(`ikas API: ${j.errors?.map((e) => e.message).join('; ') || `HTTP ${res.status}`}`);
+    const detail = (e) => e.message + (e.extensions ? ' ' + JSON.stringify(e.extensions).slice(0, 600) : '');
+    throw new Error(`ikas API: ${j.errors?.map(detail).join('; ') || `HTTP ${res.status}`}`);
   }
   return j.data;
 }
