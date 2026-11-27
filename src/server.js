@@ -10,7 +10,13 @@ import { env, runInStore, defaultStore, isStoreName } from './context.js';
 
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
-const PUBLIC_URL = process.env.PUBLIC_URL || `http://localhost:${PORT}`;
+const PUBLIC_URL = (() => {
+  const u = String(process.env.PUBLIC_URL || '').trim().replace(/\/+$/, '');
+  if (/^https?:\/\/[^/]+/.test(u)) return u;
+  if (process.env.RAILWAY_PUBLIC_DOMAIN) return `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`;
+  return `http://localhost:${PORT}`;
+})();
+process.env.PUBLIC_URL = PUBLIC_URL;
 app.set('trust proxy', 1);
 app.use(express.json({ limit: '200kb' }));
 
